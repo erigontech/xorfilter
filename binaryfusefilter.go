@@ -7,6 +7,25 @@ import (
 	"unsafe"
 )
 
+// Endianness represents the byte order of fingerprint data.
+type Endianness uint8
+
+const (
+	// LittleEndian indicates little-endian byte order.
+	LittleEndian Endianness = iota
+	// BigEndian indicates big-endian byte order.
+	BigEndian
+)
+
+// nativeEndian returns the endianness of the current machine.
+func NativeEndian() Endianness {
+	var x uint16 = 0x0102
+	if *(*byte)(unsafe.Pointer(&x)) == 0x02 {
+		return LittleEndian
+	}
+	return BigEndian
+}
+
 type Unsigned interface {
 	~uint8 | ~uint16 | ~uint32
 }
@@ -18,7 +37,8 @@ type BinaryFuse[T Unsigned] struct {
 	SegmentCount       uint32
 	SegmentCountLength uint32
 
-	Fingerprints []T
+	Fingerprints           []T
+	FingerprintsEndianness Endianness
 }
 
 // NewBinaryFuse creates a binary fuse filter with provided keys. For best
@@ -64,6 +84,7 @@ func buildBinaryFuse[T Unsigned](b *BinaryFuseBuilder, keys []uint64) (_ BinaryF
 	size := uint32(len(keys))
 	var filter BinaryFuse[T]
 	filter.initializeParameters(b, size)
+	filter.FingerprintsEndianness = NativeEndian()
 	rngcounter := uint64(1)
 	filter.Seed = splitmix64(&rngcounter)
 	capacity := uint32(len(filter.Fingerprints))
@@ -320,8 +341,24 @@ func (filter *BinaryFuse[T]) Contains(key uint64) bool {
 	hash := mixsplit(key, filter.Seed)
 	f := T(fingerprint(hash))
 	h0, h1, h2 := filter.getHashFromHash(hash)
-	f ^= filter.Fingerprints[h0] ^ filter.Fingerprints[h1] ^ filter.Fingerprints[h2]
+	f ^= filter.getFingerprint(h0) ^ filter.getFingerprint(h1) ^ filter.getFingerprint(h2)
 	return f == 0
+}
+
+// getFingerprint returns the fingerprint at index i, converting endianness if needed.
+func (filter *BinaryFuse[T]) getFingerprint(i uint32) T {
+	fp := filter.Fingerprints[i]
+	// If fingerprints are stored in non-native endianness, swap bytes on read
+	if filter.FingerprintsEndianness != NativeEndian() {
+		var zero T
+		switch unsafe.Sizeof(zero) {
+		case 2:
+			return T(swapBytesUint16(uint16(fp)))
+		case 4:
+			return T(swapBytesUint32(uint32(fp)))
+		}
+	}
+	return fp
 }
 
 func calculateSegmentLength(arity uint32, size uint32) uint32 {
@@ -374,4 +411,23 @@ func reuseBuffer[T integer](b *reusableBuffer, size int) []T {
 		b.buf = make([]uint64, max(bufSize, cap(b.buf)+cap(b.buf)/4))
 	}
 	return unsafe.Slice((*T)(unsafe.Pointer(unsafe.SliceData(b.buf))), size)
+}
+
+// swapBytesUint16 swaps the byte order of a uint16 value.
+func swapBytesUint16(v uint16) uint16 {
+	return (v << 8) | (v >> 8)
+}
+
+// swapBytesUint32 swaps the byte order of a uint32 value.
+func swapBytesUint32(v uint32) uint32 {
+	return (v << 24) | ((v << 8) & 0x00FF0000) | ((v >> 8) & 0x0000FF00) | (v >> 24)
+}
+
+// SetFingerprintsEndianness sets the endianness of the fingerprints data.
+// This does NOT convert the fingerprints in place - it tells the filter
+// what endianness the fingerprint data is stored in, so that Contains()
+// can convert on-the-fly if needed. This is useful for memory-mapped
+// fingerprints that cannot be modified.
+func (filter *BinaryFuse[T]) SetFingerprintsEndianness(endianness Endianness) {
+	filter.FingerprintsEndianness = endianness
 }
