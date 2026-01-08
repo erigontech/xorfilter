@@ -18,13 +18,15 @@ const (
 )
 
 // nativeEndian returns the endianness of the current machine.
-func NativeEndian() Endianness {
+func nativeEndian() Endianness {
 	var x uint16 = 0x0102
 	if *(*byte)(unsafe.Pointer(&x)) == 0x02 {
 		return LittleEndian
 	}
 	return BigEndian
 }
+
+var machineEndianness = nativeEndian()
 
 type Unsigned interface {
 	~uint8 | ~uint16 | ~uint32
@@ -84,7 +86,7 @@ func buildBinaryFuse[T Unsigned](b *BinaryFuseBuilder, keys []uint64) (_ BinaryF
 	size := uint32(len(keys))
 	var filter BinaryFuse[T]
 	filter.initializeParameters(b, size)
-	filter.FingerprintsEndianness = NativeEndian()
+	filter.FingerprintsEndianness = machineEndianness
 	rngcounter := uint64(1)
 	filter.Seed = splitmix64(&rngcounter)
 	capacity := uint32(len(filter.Fingerprints))
@@ -349,7 +351,7 @@ func (filter *BinaryFuse[T]) Contains(key uint64) bool {
 func (filter *BinaryFuse[T]) getFingerprint(i uint32) T {
 	fp := filter.Fingerprints[i]
 	// If fingerprints are stored in non-native endianness, swap bytes on read
-	if filter.FingerprintsEndianness != NativeEndian() {
+	if filter.FingerprintsEndianness != machineEndianness {
 		var zero T
 		switch unsafe.Sizeof(zero) {
 		case 2:
